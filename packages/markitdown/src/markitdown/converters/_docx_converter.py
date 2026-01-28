@@ -77,7 +77,9 @@ class DocxConverter(HtmlConverter):
 
         style_map = kwargs.get("style_map", None)
         pre_process_stream = pre_process_docx(file_stream)
+        html_kwargs = dict(kwargs)
+        html_kwargs.setdefault("latex_sup_sub", True)
         return self._html_converter.convert_string(
             mammoth.convert_to_html(pre_process_stream, style_map=style_map).value,
-            **kwargs,
+            **html_kwargs,
         )

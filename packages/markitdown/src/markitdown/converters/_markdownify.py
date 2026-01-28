@@ -18,6 +18,7 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
     def __init__(self, **options: Any):
         options["heading_style"] = options.get("heading_style", markdownify.ATX)
         options["keep_data_uris"] = options.get("keep_data_uris", False)
+        options["latex_sup_sub"] = options.get("latex_sup_sub", False)
         # Explicitly cast options to the expected type if necessary
         super().__init__(**options)
 
@@ -122,5 +123,67 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
             return "[x] " if el.has_attr("checked") else "[ ] "
         return ""
 
+    _SUP_START = "__MARKITDOWN_SUP_START__"
+    _SUP_END = "__MARKITDOWN_SUP_END__"
+    _SUB_START = "__MARKITDOWN_SUB_START__"
+    _SUB_END = "__MARKITDOWN_SUB_END__"
+
+    def convert_sup(
+        self,
+        el: Any,
+        text: str,
+        convert_as_inline: Optional[bool] = False,
+        **kwargs,
+    ) -> str:
+        if not self.options.get("latex_sup_sub", False):
+            return super().convert_sup(el, text, convert_as_inline, **kwargs)  # type: ignore
+        return f"{self._SUP_START}{text}{self._SUP_END}"
+
+    def convert_sub(
+        self,
+        el: Any,
+        text: str,
+        convert_as_inline: Optional[bool] = False,
+        **kwargs,
+    ) -> str:
+        if not self.options.get("latex_sup_sub", False):
+            return super().convert_sub(el, text, convert_as_inline, **kwargs)  # type: ignore
+        return f"{self._SUB_START}{text}{self._SUB_END}"
+
+    @staticmethod
+    def _format_latex_script(script_text: str, script_char: str) -> str:
+        cleaned = script_text.strip()
+        if re.fullmatch(r"[A-Za-z0-9]+", cleaned):
+            return f"{script_char}{cleaned}"
+        return f"{script_char}{{{cleaned}}}"
+
+    def _convert_latex_sup_sub(self, text: str) -> str:
+        sup_pattern = re.compile(
+            rf"(?P<base>[A-Za-z0-9]+){self._SUP_START}(?P<script>.*?){self._SUP_END}"
+        )
+        sub_pattern = re.compile(
+            rf"(?P<base>[A-Za-z0-9]+){self._SUB_START}(?P<script>.*?){self._SUB_END}"
+        )
+
+        def sup_repl(match: re.Match[str]) -> str:
+            base = match.group("base")
+            script = self._format_latex_script(match.group("script"), "^")
+            return f"${base}{script}$"
+
+        def sub_repl(match: re.Match[str]) -> str:
+            base = match.group("base")
+            script = self._format_latex_script(match.group("script"), "_")
+            return f"${base}{script}$"
+
+        updated = sup_pattern.sub(sup_repl, text)
+        updated = sub_pattern.sub(sub_repl, updated)
+
+        updated = updated.replace(self._SUP_START, "^").replace(self._SUP_END, "")
+        updated = updated.replace(self._SUB_START, "_").replace(self._SUB_END, "")
+        return updated
+
     def convert_soup(self, soup: Any) -> str:
-        return super().convert_soup(soup)  # type: ignore
+        converted = super().convert_soup(soup)  # type: ignore
+        if self.options.get("latex_sup_sub", False):
+            return self._convert_latex_sup_sub(converted)
+        return converted
