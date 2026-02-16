@@ -273,6 +273,13 @@ def test_docx_equations() -> None:
     block_equations = re.findall(r"\$\$(.+?)\$\$", result.text_content)
     assert block_equations, "No block equations found in the document."
 
+    # Ensure markdown underscore escaping is not applied inside LaTeX math spans
+    inline_math = re.findall(r"\$(?!\$)(.+?)(?<!\\)\$", result.text_content, re.DOTALL)
+    math_expressions = inline_math + block_equations
+    assert all(r"\_" not in expr for expr in math_expressions), (
+        "Escaped underscore found inside LaTeX math expression"
+    )
+
 
 def test_input_as_strings() -> None:
     markitdown = MarkItDown()

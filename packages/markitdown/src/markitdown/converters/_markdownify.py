@@ -182,8 +182,21 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
         updated = updated.replace(self._SUB_START, "_").replace(self._SUB_END, "")
         return updated
 
+    @staticmethod
+    def _unescape_math_underscores(text: str) -> str:
+        math_pattern = re.compile(
+            r"(?<!\\)(?:\$\$.*?(?<!\\)\$\$|\$(?!\$).*?(?<!\\)\$)",
+            re.DOTALL,
+        )
+
+        def unescape(match: re.Match[str]) -> str:
+            return match.group(0).replace(r"\_", "_")
+
+        return math_pattern.sub(unescape, text)
+
     def convert_soup(self, soup: Any) -> str:
         converted = super().convert_soup(soup)  # type: ignore
         if self.options.get("latex_sup_sub", False):
-            return self._convert_latex_sup_sub(converted)
+            converted = self._convert_latex_sup_sub(converted)
+            return self._unescape_math_underscores(converted)
         return converted
