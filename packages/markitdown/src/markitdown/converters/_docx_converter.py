@@ -76,9 +76,16 @@ class DocxConverter(HtmlConverter):
             )
 
         style_map = kwargs.get("style_map", None)
+        highlight_style_rule = "highlight => mark"
+        if style_map is None:
+            style_map = highlight_style_rule
+        elif highlight_style_rule not in style_map:
+            style_map = f"{style_map}\n{highlight_style_rule}"
+
         pre_process_stream = pre_process_docx(file_stream)
         html_kwargs = dict(kwargs)
         html_kwargs.setdefault("latex_sup_sub", True)
+        html_kwargs.setdefault("docx_highlight", True)
         return self._html_converter.convert_string(
             mammoth.convert_to_html(pre_process_stream, style_map=style_map).value,
             **html_kwargs,

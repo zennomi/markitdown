@@ -19,6 +19,7 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
         options["heading_style"] = options.get("heading_style", markdownify.ATX)
         options["keep_data_uris"] = options.get("keep_data_uris", False)
         options["latex_sup_sub"] = options.get("latex_sup_sub", False)
+        options["docx_highlight"] = options.get("docx_highlight", False)
         # Explicitly cast options to the expected type if necessary
         super().__init__(**options)
 
@@ -156,6 +157,48 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
         if re.fullmatch(r"[A-Za-z0-9]+", cleaned):
             return f"{script_char}{cleaned}"
         return f"{script_char}{{{cleaned}}}"
+
+    _HIGHLIGHT_STYLE_RE = re.compile(
+        r"(?:^|;)\s*(?:background-color|background|mso-highlight)\s*:",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _style_contains_highlight(cls, style: str) -> bool:
+        return bool(cls._HIGHLIGHT_STYLE_RE.search(style))
+
+    def _is_highlight_element(self, el: Any) -> bool:
+        if el is None or not getattr(el, "name", None):
+            return False
+
+        if el.name == "mark":
+            return True
+
+        if el.name != "span":
+            return False
+
+        style = el.attrs.get("style", "")
+        if isinstance(style, str) and self._style_contains_highlight(style):
+            return True
+
+        return False
+
+    @staticmethod
+    def _wrap_highlight_text(text: str) -> str:
+        prefix, suffix, chomped = markdownify.chomp(text)  # type: ignore
+        if not chomped:
+            return ""
+        return f"{prefix}=={chomped}=={suffix}"
+
+    def convert_mark(self, el: Any, text: str, parent_tags: Any) -> str:
+        if self.options.get("docx_highlight", False) and self._is_highlight_element(el):
+            return self._wrap_highlight_text(text)
+        return text
+
+    def convert_span(self, el: Any, text: str, parent_tags: Any) -> str:
+        if self.options.get("docx_highlight", False) and self._is_highlight_element(el):
+            return self._wrap_highlight_text(text)
+        return text
 
     def _convert_latex_sup_sub(self, text: str) -> str:
         sup_pattern = re.compile(

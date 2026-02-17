@@ -281,6 +281,15 @@ def test_docx_equations() -> None:
     )
 
 
+def test_docx_highlight() -> None:
+    markitdown = MarkItDown()
+    docx_file = os.path.join(TEST_FILES_DIR, "highlight.docx")
+    result = markitdown.convert(docx_file)
+
+    assert "I need to highlight these ==very important words==." in result.text_content
+    assert "background-color" not in result.text_content
+
+
 def test_input_as_strings() -> None:
     markitdown = MarkItDown()
 
