@@ -1,3 +1,8 @@
+import zipfile
+from io import BytesIO
+
+import pytest
+
 from markitdown.converter_utils.docx import pre_process
 from markitdown.converter_utils.docx.math import mathtype
 
@@ -36,6 +41,25 @@ def test_pre_process_mathtype_replaces_only_embedded_ole_objects(monkeypatch) ->
     assert b"rIdImage" in updated
 
 
+def test_pre_process_mathtype_removes_empty_ole_equations(monkeypatch) -> None:
+    monkeypatch.setattr(pre_process, "extract_latex_from_ole", lambda _: "")
+    files = {
+        "word/document.xml": b'<w:object><o:OLEObject r:id="rIdEquation"/></w:object>',
+        "word/_rels/document.xml.rels": (
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rIdEquation" Target="embeddings/equation.bin"/>'
+            b"</Relationships>"
+        ),
+        "word/embeddings/equation.bin": b"empty equation",
+    }
+
+    updated, generated_tex = pre_process._pre_process_mathtype(files)
+
+    assert updated is not None
+    assert b"w:object" not in updated
+    assert generated_tex == set()
+
+
 def test_post_process_markdown_restores_mathtype_latex() -> None:
     assert pre_process.post_process_markdown(r"$x\_y$$z$", {r"x_y"}) == r"$x_y$ $z$"
 
@@ -48,6 +72,10 @@ def test_mathtype_uses_embedded_tex_metadata(monkeypatch) -> None:
     )
 
     assert mathtype.extract_latex_from_ole(b"OLE") == "x_y"
+
+
+def test_mathtype_renders_mtextra_spacing_character() -> None:
+    assert mathtype._tex_character(0xEF05, 139) == r"\quad "
 
 
 def test_mathtype_renders_vector_and_fence_templates(monkeypatch) -> None:
@@ -75,3 +103,151 @@ def test_mathtype_renders_vector_and_fence_templates(monkeypatch) -> None:
         mathtype.extract_latex_from_ole(b"OLE")
         == r"\vec{v}\left[{x}\right]\left|{y}\right|"
     )
+
+
+def _template(selector: int, variation: int = 0, *contents: str) -> dict:
+    return {
+        "kind": "template",
+        "selector": selector,
+        "variation": variation,
+        "children": [
+            {
+                "kind": "line",
+                "children": [{"kind": "char", "mtcode": ord(text), "typeface": 131}],
+            }
+            for text in contents
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("selector", "variation", "expected"),
+    [
+        (0, 3, r"\left\langle{x}\right\rangle"),
+        (2, 3, r"\left\{{x}\right\}"),
+        (5, 3, r"\left\|{x}\right\|"),
+        (6, 3, r"\left\lfloor{x}\right\rfloor"),
+        (7, 3, r"\left\lceil{x}\right\rceil"),
+        (9, 0x23, r"\left]{x}\right["),
+        (11, 2, r"{x}/{y}"),
+        (12, 1, r"\underline{\underline{x}}"),
+        (13, 0, r"\overline{x}"),
+        (14, 0x28, r"\underset{\rightarrow}{x}"),
+        (16, 1, r"\sum_{z}^{y}x"),
+        (19, 0, r"\bigcup x"),
+        (23, 0, r"\lim_{y}^{z}x"),
+        (24, 1, r"\overbrace{x}^{y}"),
+        (25, 0, r"\underbracket{x}_{y}"),
+        (26, 0, r"\overline{x})y"),
+        (27, 0, r"_{x}^{y}"),
+        (30, 3, r"\langlex|y\rangle"),
+        (31, 4, r"\underset{\rightarrow}{x}"),
+        (32, 0, r"\widetilde{x}"),
+        (33, 0, r"\widehat{x}"),
+        (34, 0, r"\overset{\frown}{x}"),
+        (35, 0, r"\overset{\smile}{x}"),
+        (36, 1, r"\cancel{x}"),
+        (37, 0, r"\boxed{x}"),
+    ],
+)
+def test_mathtype_renders_documented_v5_templates(
+    selector: int, variation: int, expected: str
+) -> None:
+    if selector in {16, 23}:
+        contents = ("x", "y", "z")
+    elif selector in {14, 19}:
+        contents = ("x",)
+    else:
+        contents = ("x", "y")
+    assert mathtype._render_mtef(_template(selector, variation, *contents)) == expected
+
+
+def test_mathtype_supports_every_documented_v5_template_selector() -> None:
+    for selector in range(38):
+        assert mathtype._render_mtef(_template(selector, 0, "x", "y", "z", "∑"))
+
+
+def test_mathtype_parses_legacy_v3_and_v4_records() -> None:
+    def char(value: str) -> bytes:
+        return b"\x02\x83" + ord(value).to_bytes(2, "little")
+
+    def line(contents: bytes) -> bytes:
+        return b"\x01" + contents + b"\x00"
+
+    def template(selector: int, variation: int, contents: bytes) -> bytes:
+        return b"\x03" + bytes((selector, variation, 0)) + contents + b"\x00"
+
+    fraction = template(14, 0, line(char("x")) + line(char("y")))
+    script = template(15, 2, line(char("i")) + line(char("j")))
+    for version, equation, expected in (
+        (3, fraction, r"\frac{x}{y}"),
+        (4, script, r"_{i}^{j}"),
+    ):
+        payload = bytes((version, 1, 0, 3, 0)) + line(equation)
+        tree = mathtype._build_mtef_tree(mathtype._read_mtef_nodes(payload))
+        assert mathtype._render_mtef(tree) == expected
+
+
+def test_mathtype_uses_font_position_when_mtcode_is_omitted() -> None:
+    header = b"\x05\x01\x00\x06\x00DSMT6\x00\x01"
+    # CHAR options 0x24: no MTCode, followed by one byte of font position.
+    payload = header + b"\x01\x00\x02\x24\x83x\x00"
+
+    tree = mathtype._build_mtef_tree(mathtype._read_mtef_nodes(payload))
+
+    assert mathtype._render_mtef(tree) == "x"
+
+
+def test_pre_process_docx_handles_mathtype_in_each_word_story(monkeypatch) -> None:
+    monkeypatch.setattr(pre_process, "extract_latex_from_ole", lambda _: "x")
+    object_xml = b'<w:object><o:OLEObject r:id="rIdEquation"/></w:object>'
+    relationships = (
+        b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        b'<Relationship Id="rIdEquation" Target="embeddings/equation.bin"/>'
+        b"</Relationships>"
+    )
+    input_docx = BytesIO()
+    with zipfile.ZipFile(input_docx, "w") as archive:
+        for part in ("word/document.xml", "word/footnotes.xml", "word/header1.xml"):
+            archive.writestr(part, object_xml)
+            directory, filename = part.rsplit("/", 1)
+            archive.writestr(f"{directory}/_rels/{filename}.rels", relationships)
+        archive.writestr("word/embeddings/equation.bin", b"equation")
+    input_docx.seek(0)
+
+    output_docx = pre_process.pre_process_docx(input_docx)
+
+    assert output_docx.generated_tex == {"x"}
+    with zipfile.ZipFile(output_docx) as archive:
+        for part in ("word/document.xml", "word/footnotes.xml", "word/header1.xml"):
+            assert b"w:object" not in archive.read(part)
+
+
+def test_mathtype_parses_nudged_ruler_and_matrix_records() -> None:
+    def char(value: str) -> bytes:
+        return b"\x02\x00\x83" + ord(value).to_bytes(2, "little")
+
+    def line(contents: bytes, options: int = 0) -> bytes:
+        return b"\x01" + bytes((options,)) + contents + b"\x00"
+
+    header = b"\x05\x01\x00\x06\x00DSMT6\x00\x01"
+    ruler = b"\x07\x01\x00\x00\x00"
+    nudged_line = line(b"\x81\x81" + ruler + char("x"), options=0x0A)
+    matrix = (
+        b"\x05\x00\x00\x00\x00\x02\x02\x00\x00"
+        + b"".join(line(char(value)) for value in "abcd")
+        + b"\x00"
+    )
+    definitions = (
+        b"\x13WinAllBasicCodePages\x00"  # encoding definition
+        b"\x11\x05Times New Roman\x00"  # font definition
+        b"\x08\x01\x02"  # font style definition
+        b"\x09\x64\x00\x00\x00"  # extended size record
+        b"\x0f\x01"  # color reference
+        b"\x10\x00\x00\x00\x00\x00\x00\x00"  # RGB color definition
+        b"\x64\xff\x02\x00OK"  # future record with a three-byte length
+    )
+    nodes = mathtype._read_mtef_nodes(header + definitions + line(nudged_line + matrix))
+    rendered = mathtype._render_mtef(mathtype._build_mtef_tree(nodes))
+
+    assert rendered == r"x\begin{array}{cc}a & b\\c & d\end{array}"

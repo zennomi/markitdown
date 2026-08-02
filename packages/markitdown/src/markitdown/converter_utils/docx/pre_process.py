@@ -167,7 +167,7 @@ def _pre_process_mathtype(
         for target in set(rid_to_target.values())
         if target.startswith("word/embeddings/")
         and target in files
-        and (tex := extract_latex_from_ole(files[target]))
+        and (tex := extract_latex_from_ole(files[target])) is not None
     }
     if not target_to_latex:
         return None, set()
@@ -184,7 +184,9 @@ def _pre_process_mathtype(
             r"""r:(?:id|embed|link)=["']([^"']+)["']""", match.group(0)
         ):
             tex = target_to_latex.get(rid_to_target.get(relationship_id, ""))
-            if tex:
+            if tex is not None:
+                if not tex:
+                    return ""
                 generated_tex.add(tex)
                 return f'<w:t xml:space="preserve">${html.escape(tex)}$</w:t>'
         return match.group(0)
@@ -207,16 +209,27 @@ def post_process_markdown(markdown: str, generated_tex: set[str]) -> str:
 def pre_process_docx(input_docx: BinaryIO) -> _PreprocessedDocx:
     """Pre-process OMML and MathType equations in a DOCX file in memory."""
     output_docx = _PreprocessedDocx()
-    pre_process_enable_files = [
-        "word/document.xml",
-        "word/footnotes.xml",
-        "word/endnotes.xml",
-    ]
     with zipfile.ZipFile(input_docx, mode="r") as zip_input:
         files = {name: zip_input.read(name) for name in zip_input.namelist()}
-        mathtype_content, output_docx.generated_tex = _pre_process_mathtype(files)
-        if mathtype_content is not None:
-            files["word/document.xml"] = mathtype_content
+        # Each Word story has its own relationship part. Process every story
+        # that Mammoth can read, not just the document body.
+        pre_process_enable_files = [
+            name
+            for name in files
+            if name
+            in {
+                "word/document.xml",
+                "word/footnotes.xml",
+                "word/endnotes.xml",
+                "word/comments.xml",
+            }
+            or re.fullmatch(r"word/(?:header|footer)\d+\.xml", name)
+        ]
+        for source_part in pre_process_enable_files:
+            mathtype_content, generated_tex = _pre_process_mathtype(files, source_part)
+            if mathtype_content is not None:
+                files[source_part] = mathtype_content
+            output_docx.generated_tex.update(generated_tex)
 
         with zipfile.ZipFile(output_docx, mode="w") as zip_output:
             zip_output.comment = zip_input.comment
