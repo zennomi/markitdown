@@ -162,6 +162,31 @@ def test_mathtype_renders_documented_v5_templates(
     assert mathtype._render_mtef(_template(selector, variation, *contents)) == expected
 
 
+@pytest.mark.parametrize(
+    ("variation", "expected"),
+    [
+        (1, r"\left\{{x}\right."),
+        (2, r"\left.{x}\right\}"),
+    ],
+)
+def test_mathtype_pairs_one_sided_fences_with_null_delimiters(
+    variation: int, expected: str
+) -> None:
+    assert mathtype._render_mtef(_template(2, variation, "x")) == expected
+
+
+def test_mathtype_renders_piles_inside_an_array() -> None:
+    pile = {
+        "kind": "pile",
+        "children": [
+            {"kind": "line", "children": [{"kind": "char", "mtcode": ord("x"), "typeface": 131}]},
+            {"kind": "line", "children": [{"kind": "char", "mtcode": ord("y"), "typeface": 131}]},
+        ],
+    }
+
+    assert mathtype._render_mtef(pile) == r"\begin{array}{c}x\\y\end{array}"
+
+
 def test_mathtype_supports_every_documented_v5_template_selector() -> None:
     for selector in range(38):
         assert mathtype._render_mtef(_template(selector, 0, "x", "y", "z", "∑"))

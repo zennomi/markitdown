@@ -455,8 +455,13 @@ def _tex_character(mtcode, typeface):
 
 
 def _fence(middle, variation, left, right):
-    left_tex = rf"\left{left}" if variation & 0x01 else ""
-    right_tex = rf"\right{right}" if variation & 0x02 else ""
+    has_left = bool(variation & 0x01)
+    has_right = bool(variation & 0x02)
+    # TeX requires every \left delimiter to be paired with a \right delimiter.
+    # MathType uses the variation bits for one-sided fences, so use an invisible
+    # delimiter on the absent side instead of emitting invalid TeX.
+    left_tex = rf"\left{left}" if has_left else (r"\left." if has_right else "")
+    right_tex = rf"\right{right}" if has_right else (r"\right." if has_left else "")
     return f"{left_tex}{{{middle}}}{right_tex}"
 
 
@@ -753,7 +758,13 @@ def _render_mtef(node):
         # as valid TeX instead of discarding an entire otherwise-readable OLE.
         return "".join(slots)
     if kind == "pile":
-        return r"\\".join(_render_mtef(child) for child in node["children"])
+        # A pile is a vertical stack. A bare ``\\`` is only valid inside an
+        # alignment environment, so wrap the lines in a one-column array.
+        return (
+            r"\begin{array}{c}"
+            + r"\\".join(_render_mtef(child) for child in node["children"])
+            + r"\end{array}"
+        )
     if kind == "matrix":
         columns = node["columns"]
         if not columns:
