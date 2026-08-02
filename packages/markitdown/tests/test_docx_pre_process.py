@@ -48,3 +48,30 @@ def test_mathtype_uses_embedded_tex_metadata(monkeypatch) -> None:
     )
 
     assert mathtype.extract_latex_from_ole(b"OLE") == "x_y"
+
+
+def test_mathtype_renders_vector_and_fence_templates(monkeypatch) -> None:
+    def char(codepoint: int) -> bytes:
+        return b"\x02\x00\x83" + codepoint.to_bytes(2, "little")
+
+    def line(contents: bytes) -> bytes:
+        return b"\x01\x00" + contents + b"\x00"
+
+    def template(selector: int, variation: int, contents: bytes) -> bytes:
+        return b"\x03\x00" + bytes((selector, variation, 0)) + contents + b"\x00"
+
+    mtef_header = b"\x05\x01\x00\x06\x00DSMT6\x00\x01"
+    vector = template(31, 2, line(char(ord("v"))) + char(0x20D7))
+    brackets = template(3, 3, line(char(ord("x"))) + char(ord("[")) + char(ord("]")))
+    bars = template(4, 3, line(char(ord("y"))) + char(0xEC07) + char(0xEC08))
+    payload = mtef_header + line(vector + brackets + bars)
+    native = bytearray(28)
+    native[:2] = (28).to_bytes(2, "little")
+    native[8:12] = len(payload).to_bytes(4, "little")
+    native.extend(payload)
+    monkeypatch.setattr(mathtype, "_equation_native_stream", lambda _: bytes(native))
+
+    assert (
+        mathtype.extract_latex_from_ole(b"OLE")
+        == r"\vec{v}\left[{x}\right]\left|{y}\right|"
+    )

@@ -39,11 +39,14 @@ _MTEF_FUTURE = 100
 # MathType selectors used to describe structured equation constructs.
 _TMPL_PAREN = 1
 _TMPL_BRACE = 2
+_TMPL_BRACK = 3
+_TMPL_BAR = 4
 _TMPL_ROOT = 10
 _TMPL_FRACTION = 11
 _TMPL_SUB = 27
 _TMPL_SUP = 28
 _TMPL_SUBSUP = 29
+_TMPL_VECTOR = 31
 _TMPL_HAT = 33
 
 # MathType stores Unicode MTCode values, not Symbol-font byte values.  Mapping
@@ -300,10 +303,16 @@ def _render_mtef(node):
                 if not slot(1)
                 else rf"\sqrt[{slot(1)}]{{{slot(0)}}}"
             )
-        if selector == _TMPL_PAREN:
-            middle, left, right = slot(0), slot(1), slot(2)
-            left_tex = rf"\left{left}" if left else ""
-            right_tex = rf"\right{right}" if right else ""
+        if selector in (_TMPL_PAREN, _TMPL_BRACK, _TMPL_BAR):
+            middle = slot(0)
+            delimiters = {
+                _TMPL_PAREN: ("(", ")"),
+                _TMPL_BRACK: ("[", "]"),
+                _TMPL_BAR: ("|", "|"),
+            }
+            left, right = delimiters[selector]
+            left_tex = rf"\left{left}" if node["variation"] & 0x01 else ""
+            right_tex = rf"\right{right}" if node["variation"] & 0x02 else ""
             return f"{left_tex}{{{middle}}}{right_tex}"
         if selector == _TMPL_BRACE:
             middle, left, right = slot(0), slot(1), slot(2)
@@ -322,6 +331,27 @@ def _render_mtef(node):
             return (rf"_{{{slot(0)}}}" if slot(0) else "") + (
                 rf"^{{{slot(1)}}}" if slot(1) else ""
             )
+        if selector == _TMPL_VECTOR:
+            contents = slot(0)
+            variation = node["variation"]
+            if variation & 0x08:
+                arrows = {
+                    0x01: r"\leftharpoonup",
+                    0x02: r"\rightharpoonup",
+                    0x03: r"\leftrightharpoons",
+                }
+            else:
+                arrows = {
+                    0x01: r"\leftarrow",
+                    0x02: r"\rightarrow",
+                    0x03: r"\leftrightarrow",
+                }
+            arrow = arrows.get(variation & 0x03, r"\rightarrow")
+            if variation & 0x04:
+                return rf"\underset{{{arrow}}}{{{contents}}}"
+            if variation == 0x02:
+                return rf"\vec{{{contents}}}"
+            return rf"\overset{{{arrow}}}{{{contents}}}"
         if selector == _TMPL_HAT:
             return f"{slot(1).rstrip()}{{{slot(0)}}}"
         raise MTEFParseError(f"unsupported MTEF template selector {selector}")
