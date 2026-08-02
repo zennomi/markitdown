@@ -1,10 +1,15 @@
+import html
+import posixpath
+import re
 import zipfile
+from collections.abc import Mapping
 from io import BytesIO
 from typing import BinaryIO
 from xml.etree import ElementTree as ET
 
 from bs4 import BeautifulSoup, Tag
 
+from .math.mathtype import extract_latex_from_ole
 from .math.omml import OMML_NS, oMath2Latex
 
 MATH_ROOT_TEMPLATE = "".join(
@@ -118,22 +123,90 @@ def _pre_process_math(content: bytes) -> bytes:
     return str(soup).encode()
 
 
-def pre_process_docx(input_docx: BinaryIO) -> BinaryIO:
-    """
-    Pre-processes a DOCX file with provided steps.
+class _PreprocessedDocx(BytesIO):
+    """A preprocessed DOCX stream and the MathType expressions inserted into it."""
 
-    The process works by unzipping the DOCX file in memory, transforming specific XML files
-    (such as converting OMML elements to LaTeX), and then zipping everything back into a
-    DOCX file without writing to disk.
+    generated_tex: set[str]
 
-    Args:
-        input_docx (BinaryIO): A binary input stream representing the DOCX file.
+    def __init__(self) -> None:
+        super().__init__()
+        self.generated_tex = set()
 
-    Returns:
-        BinaryIO: A binary output stream representing the processed DOCX file.
-    """
-    output_docx = BytesIO()
-    # The files that need to be pre-processed from .docx
+
+def _relationship_target(source_part: str, target: str) -> str:
+    """Resolve a relationship target relative to its DOCX package part."""
+    return posixpath.normpath(
+        posixpath.join(posixpath.dirname(source_part), target)
+    ).lstrip("/")
+
+
+def _pre_process_mathtype(
+    files: Mapping[str, bytes], source_part: str = "word/document.xml"
+) -> tuple[bytes | None, set[str]]:
+    """Replace MathType OLE objects in a DOCX XML part with inline LaTeX."""
+    relationships_part = (
+        f"{posixpath.dirname(source_part)}/_rels/{posixpath.basename(source_part)}.rels"
+    )
+    if source_part not in files or relationships_part not in files:
+        return None, set()
+
+    try:
+        relationships_root = ET.fromstring(files[relationships_part])
+    except ET.ParseError:
+        return None, set()
+
+    rid_to_target = {
+        relationship.attrib["Id"]: _relationship_target(
+            source_part, relationship.attrib["Target"]
+        )
+        for relationship in relationships_root
+        if relationship.attrib.get("Id") and relationship.attrib.get("Target")
+    }
+    target_to_latex = {
+        target: tex
+        for target in set(rid_to_target.values())
+        if target.startswith("word/embeddings/")
+        and target in files
+        and (tex := extract_latex_from_ole(files[target]))
+    }
+    if not target_to_latex:
+        return None, set()
+
+    try:
+        xml_content = files[source_part].decode("utf-8")
+    except UnicodeDecodeError:
+        return None, set()
+
+    generated_tex: set[str] = set()
+
+    def replace_object(match: re.Match[str]) -> str:
+        for relationship_id in re.findall(
+            r"""r:(?:id|embed|link)=["']([^"']+)["']""", match.group(0)
+        ):
+            tex = target_to_latex.get(rid_to_target.get(relationship_id, ""))
+            if tex:
+                generated_tex.add(tex)
+                return f'<w:t xml:space="preserve">${html.escape(tex)}$</w:t>'
+        return match.group(0)
+
+    updated_xml = re.sub(
+        r"<w:object\b.*?</w:object>", replace_object, xml_content, flags=re.DOTALL
+    )
+    return updated_xml.encode("utf-8"), generated_tex
+
+
+def post_process_markdown(markdown: str, generated_tex: set[str]) -> str:
+    """Restore the MathType LaTeX that the Markdown converter escaped."""
+    for tex in generated_tex:
+        escaped_tex = re.sub(r"([_*\[\]`])", r"\\\1", tex)
+        markdown = markdown.replace(f"${escaped_tex}$", f"${tex}$")
+        markdown = markdown.replace(f"${tex}$$", f"${tex}$ $")
+    return markdown
+
+
+def pre_process_docx(input_docx: BinaryIO) -> _PreprocessedDocx:
+    """Pre-process OMML and MathType equations in a DOCX file in memory."""
+    output_docx = _PreprocessedDocx()
     pre_process_enable_files = [
         "word/document.xml",
         "word/footnotes.xml",
@@ -141,17 +214,18 @@ def pre_process_docx(input_docx: BinaryIO) -> BinaryIO:
     ]
     with zipfile.ZipFile(input_docx, mode="r") as zip_input:
         files = {name: zip_input.read(name) for name in zip_input.namelist()}
+        mathtype_content, output_docx.generated_tex = _pre_process_mathtype(files)
+        if mathtype_content is not None:
+            files["word/document.xml"] = mathtype_content
+
         with zipfile.ZipFile(output_docx, mode="w") as zip_output:
             zip_output.comment = zip_input.comment
             for name, content in files.items():
                 if name in pre_process_enable_files:
                     try:
-                        # Pre-process the content
-                        updated_content = _pre_process_math(content)
-                        # In the future, if there are more pre-processing steps, they can be added here
-                        zip_output.writestr(name, updated_content)
+                        zip_output.writestr(name, _pre_process_math(content))
                     except Exception:
-                        # If there is an error in processing the content, write the original content
+                        # Preserve the original DOCX part if its XML cannot be processed.
                         zip_output.writestr(name, content)
                 else:
                     zip_output.writestr(name, content)
