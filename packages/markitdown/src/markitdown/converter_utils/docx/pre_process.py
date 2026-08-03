@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup, Tag
 from .math.mathtype import extract_latex_from_ole
 from .math.omml import OMML_NS, oMath2Latex
 
+WORDPROCESSINGML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W = f"{{{WORDPROCESSINGML_NS}}}"
+
 MATH_ROOT_TEMPLATE = "".join(
     (
         "<w:document ",
@@ -197,6 +200,219 @@ def _pre_process_mathtype(
     return updated_xml.encode("utf-8"), generated_tex
 
 
+def _word_tag(name: str) -> str:
+    return f"{W}{name}"
+
+
+def _read_numbering_level(level: ET.Element) -> dict[str, str | int]:
+    """Extract the label format from a ``w:lvl`` element."""
+    num_fmt = level.find(_word_tag("numFmt"))
+    level_text = level.find(_word_tag("lvlText"))
+    start = level.find(_word_tag("start"))
+    try:
+        start_value = int(start.get(_word_tag("val"), "1")) if start is not None else 1
+    except ValueError:
+        start_value = 1
+    return {
+        "format": num_fmt.get(_word_tag("val"), "decimal")
+        if num_fmt is not None
+        else "decimal",
+        "text": level_text.get(_word_tag("val"), "") if level_text is not None else "",
+        "start": start_value,
+    }
+
+
+def _numbering_level_definitions(
+    files: Mapping[str, bytes],
+) -> dict[str, dict[int, dict[str, str | int]]]:
+    """Read the numbering formats for each concrete Word numbering instance."""
+    numbering_xml = files.get("word/numbering.xml")
+    if numbering_xml is None:
+        return {}
+
+    try:
+        root = ET.fromstring(numbering_xml)
+    except ET.ParseError:
+        return {}
+
+    abstract_levels: dict[str, dict[int, dict[str, str | int]]] = {}
+    for abstract_num in root.findall(_word_tag("abstractNum")):
+        abstract_num_id = abstract_num.get(_word_tag("abstractNumId"))
+        if abstract_num_id is None:
+            continue
+        levels: dict[int, dict[str, str | int]] = {}
+        for level in abstract_num.findall(_word_tag("lvl")):
+            level_index = level.get(_word_tag("ilvl"))
+            if level_index is None:
+                continue
+            try:
+                index = int(level_index)
+            except ValueError:
+                continue
+            levels[index] = _read_numbering_level(level)
+        abstract_levels[abstract_num_id] = levels
+
+    definitions: dict[str, dict[int, dict[str, str | int]]] = {}
+    for num in root.findall(_word_tag("num")):
+        num_id = num.get(_word_tag("numId"))
+        abstract_num_id_element = num.find(_word_tag("abstractNumId"))
+        if num_id is None or abstract_num_id_element is None:
+            continue
+        abstract_num_id = abstract_num_id_element.get(_word_tag("val"))
+        if abstract_num_id is None or abstract_num_id not in abstract_levels:
+            continue
+        levels = {
+            index: value.copy()
+            for index, value in abstract_levels[abstract_num_id].items()
+        }
+        for override in num.findall(_word_tag("lvlOverride")):
+            override_index = override.get(_word_tag("ilvl"))
+            if override_index is None:
+                continue
+            try:
+                index = int(override_index)
+            except ValueError:
+                continue
+            override_level = override.find(_word_tag("lvl"))
+            if override_level is not None:
+                levels[index] = _read_numbering_level(override_level)
+            start_override = override.find(_word_tag("startOverride"))
+            if start_override is not None and index in levels:
+                try:
+                    levels[index]["start"] = int(
+                        start_override.get(_word_tag("val"), "1")
+                    )
+                except ValueError:
+                    pass
+        definitions[num_id] = levels
+    return definitions
+
+
+def _format_number(value: int, number_format: str) -> str:
+    if number_format == "decimalZero":
+        return f"{value:02d}"
+    if number_format in {"lowerLetter", "upperLetter"}:
+        result = ""
+        while value > 0:
+            value, remainder = divmod(value - 1, 26)
+            result = chr(ord("a") + remainder) + result
+        return result.upper() if number_format == "upperLetter" else result
+    if number_format in {"lowerRoman", "upperRoman"}:
+        numerals = (
+            (1000, "M"),
+            (900, "CM"),
+            (500, "D"),
+            (400, "CD"),
+            (100, "C"),
+            (90, "XC"),
+            (50, "L"),
+            (40, "XL"),
+            (10, "X"),
+            (9, "IX"),
+            (5, "V"),
+            (4, "IV"),
+            (1, "I"),
+        )
+        result = ""
+        for amount, numeral in numerals:
+            count, value = divmod(value, amount)
+            result += numeral * count
+        return result.lower() if number_format == "lowerRoman" else result
+    return str(value)
+
+
+def _render_numbering_label(
+    level_text: str,
+    levels: dict[int, dict[str, str | int]],
+    counters: dict[int, int],
+) -> str:
+    def replace_placeholder(match: re.Match[str]) -> str:
+        index = int(match.group(1)) - 1
+        definition = levels.get(index)
+        if definition is None:
+            return match.group(0)
+        value = counters.get(index, int(definition["start"]))
+        return _format_number(value, str(definition["format"]))
+
+    return re.sub(r"%([1-9])", replace_placeholder, level_text)
+
+
+def _is_standard_markdown_numbering(level_index: int, level_text: str) -> bool:
+    """Whether Mammoth's ordinary ordered-list output preserves this label."""
+    return level_text == f"%{level_index + 1}."
+
+
+def _pre_process_numbering_labels(
+    files: Mapping[str, bytes], source_part: str
+) -> bytes | None:
+    """Materialize custom Word list labels as paragraph text before Mammoth runs."""
+    if source_part not in files:
+        return None
+    definitions = _numbering_level_definitions(files)
+    if not definitions:
+        return None
+    try:
+        root = ET.fromstring(files[source_part])
+    except ET.ParseError:
+        return None
+
+    counters_by_num_id: dict[str, dict[int, int]] = {}
+    changed = False
+    for paragraph in root.iter(_word_tag("p")):
+        properties = paragraph.find(_word_tag("pPr"))
+        if properties is None:
+            continue
+        num_properties = properties.find(_word_tag("numPr"))
+        if num_properties is None:
+            continue
+        num_id_element = num_properties.find(_word_tag("numId"))
+        level_element = num_properties.find(_word_tag("ilvl"))
+        if num_id_element is None:
+            continue
+        num_id = num_id_element.get(_word_tag("val"))
+        try:
+            level_index = (
+                int(level_element.get(_word_tag("val"), "0"))
+                if level_element is not None
+                else 0
+            )
+        except ValueError:
+            continue
+        levels = definitions.get(num_id or "")
+        if levels is None or level_index not in levels:
+            continue
+
+        level = levels[level_index]
+        if level["format"] == "bullet":
+            continue
+        counters = counters_by_num_id.setdefault(num_id or "", {})
+        counters[level_index] = counters.get(level_index, int(level["start"]) - 1) + 1
+        for deeper_level in tuple(counters):
+            if deeper_level > level_index:
+                del counters[deeper_level]
+
+        level_text = str(level["text"])
+        if _is_standard_markdown_numbering(level_index, level_text):
+            continue
+        label = _render_numbering_label(level_text, levels, counters)
+        if not label:
+            continue
+        if not label[-1].isspace():
+            label += " "
+
+        properties.remove(num_properties)
+        run = ET.Element(_word_tag("r"))
+        text = ET.SubElement(run, _word_tag("t"))
+        text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        text.text = label
+        paragraph.insert(list(paragraph).index(properties) + 1, run)
+        changed = True
+
+    return (
+        ET.tostring(root, encoding="utf-8", xml_declaration=True) if changed else None
+    )
+
+
 def post_process_markdown(markdown: str, generated_tex: set[str]) -> str:
     """Restore the MathType LaTeX that the Markdown converter escaped."""
     for tex in generated_tex:
@@ -206,8 +422,10 @@ def post_process_markdown(markdown: str, generated_tex: set[str]) -> str:
     return markdown
 
 
-def pre_process_docx(input_docx: BinaryIO) -> _PreprocessedDocx:
-    """Pre-process OMML and MathType equations in a DOCX file in memory."""
+def pre_process_docx(
+    input_docx: BinaryIO, *, preserve_docx_numbering: bool = False
+) -> _PreprocessedDocx:
+    """Pre-process DOCX math and, optionally, custom Word numbering labels."""
     output_docx = _PreprocessedDocx()
     with zipfile.ZipFile(input_docx, mode="r") as zip_input:
         files = {name: zip_input.read(name) for name in zip_input.namelist()}
@@ -230,17 +448,22 @@ def pre_process_docx(input_docx: BinaryIO) -> _PreprocessedDocx:
             if mathtype_content is not None:
                 files[source_part] = mathtype_content
             output_docx.generated_tex.update(generated_tex)
+            try:
+                # ElementTree, used for numbering labels below, renames XML prefixes.
+                # Convert OMML first because its converter expects the math prefix in
+                # the original Word XML.
+                files[source_part] = _pre_process_math(files[source_part])
+            except Exception:
+                # Preserve the original DOCX part if its XML cannot be processed.
+                pass
+            if preserve_docx_numbering:
+                numbered_content = _pre_process_numbering_labels(files, source_part)
+                if numbered_content is not None:
+                    files[source_part] = numbered_content
 
         with zipfile.ZipFile(output_docx, mode="w") as zip_output:
             zip_output.comment = zip_input.comment
             for name, content in files.items():
-                if name in pre_process_enable_files:
-                    try:
-                        zip_output.writestr(name, _pre_process_math(content))
-                    except Exception:
-                        # Preserve the original DOCX part if its XML cannot be processed.
-                        zip_output.writestr(name, content)
-                else:
-                    zip_output.writestr(name, content)
+                zip_output.writestr(name, content)
     output_docx.seek(0)
     return output_docx

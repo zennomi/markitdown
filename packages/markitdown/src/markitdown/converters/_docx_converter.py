@@ -77,7 +77,10 @@ class DocxConverter(HtmlConverter):
         elif highlight_style_rule not in style_map:
             style_map = f"{style_map}\n{highlight_style_rule}"
 
-        pre_process_stream = pre_process_docx(file_stream)
+        pre_process_stream = pre_process_docx(
+            file_stream,
+            preserve_docx_numbering=kwargs.get("preserve_docx_numbering", False),
+        )
         html_kwargs = dict(kwargs)
         html_kwargs.setdefault("latex_sup_sub", True)
         html_kwargs.setdefault("docx_highlight", True)

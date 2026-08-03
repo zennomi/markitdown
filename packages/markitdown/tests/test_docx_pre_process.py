@@ -3,8 +3,72 @@ from io import BytesIO
 
 import pytest
 
+from markitdown import MarkItDown, StreamInfo
 from markitdown.converter_utils.docx import pre_process
 from markitdown.converter_utils.docx.math import mathtype
+
+
+def _custom_numbered_docx() -> BytesIO:
+    """Build a minimal DOCX with custom and ordinary numbered-list formats."""
+    document_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>
+  <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First question</w:t></w:r></w:p>
+  <m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>
+  <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Second question</w:t></w:r></w:p>
+  <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr><w:r><w:t>Ordinary item</w:t></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>'''
+    numbering_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="C\xc3\xa2u %1:"/></w:lvl></w:abstractNum>
+  <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>'''
+    content_types = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
+</Types>'''
+    package_relationships = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>'''
+    document_relationships = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
+</Relationships>'''
+    docx = BytesIO()
+    with zipfile.ZipFile(docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", package_relationships)
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/numbering.xml", numbering_xml)
+        archive.writestr("word/_rels/document.xml.rels", document_relationships)
+    docx.seek(0)
+    return docx
+
+
+def test_docx_preserves_custom_numbering_labels_when_requested() -> None:
+    markitdown = MarkItDown()
+    default_result = markitdown.convert_stream(
+        _custom_numbered_docx(), stream_info=StreamInfo(extension=".docx")
+    )
+    assert "1. First question" in default_result.text_content
+    assert "Câu" not in default_result.text_content
+
+    result = markitdown.convert_stream(
+        _custom_numbered_docx(),
+        stream_info=StreamInfo(extension=".docx"),
+        preserve_docx_numbering=True,
+    )
+
+    assert "Câu 1: First question" in result.text_content
+    assert "Câu 2: Second question" in result.text_content
+    assert "$$x$$" in result.text_content
+    assert "1. Ordinary item" in result.text_content
 
 
 def test_pre_process_mathtype_replaces_only_embedded_ole_objects(monkeypatch) -> None:

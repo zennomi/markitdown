@@ -42,6 +42,18 @@ result = md.convert("test.xlsx")
 print(result.text_content)
 ```
 
+### DOCX numbering
+
+By default, Word numbered lists are converted to standard Markdown lists. To retain
+custom Word list labels such as `Câu 1:` or `Bài 1:`, enable
+`preserve_docx_numbering`:
+
+```python
+result = md.convert("questions.docx", preserve_docx_numbering=True)
+```
+
+From the command line, use `--preserve-docx-numbering`.
+
 ### More Information
 
 For more information, and full documentation, see the project [README.md](https://github.com/microsoft/markitdown) on GitHub.

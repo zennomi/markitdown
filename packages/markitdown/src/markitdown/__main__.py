@@ -138,6 +138,12 @@ def main():
         help="Keep data URIs (like base64-encoded images) in the output. By default, data URIs are truncated.",
     )
 
+    parser.add_argument(
+        "--preserve-docx-numbering",
+        action="store_true",
+        help="Keep custom Word numbered-list labels, such as 'Câu 1:', as paragraph text.",
+    )
+
     parser.add_argument("filename", nargs="?")
     args = parser.parse_args()
 
@@ -249,10 +255,14 @@ def main():
             sys.stdin.buffer,
             stream_info=stream_info,
             keep_data_uris=args.keep_data_uris,
+            preserve_docx_numbering=args.preserve_docx_numbering,
         )
     else:
         result = markitdown.convert(
-            args.filename, stream_info=stream_info, keep_data_uris=args.keep_data_uris
+            args.filename,
+            stream_info=stream_info,
+            keep_data_uris=args.keep_data_uris,
+            preserve_docx_numbering=args.preserve_docx_numbering,
         )
 
     _handle_output(args, result)
